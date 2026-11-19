@@ -10,9 +10,9 @@ JOBS = [
     ("XAUUSD", "td", "XAU/USD", "1h"),
     ("XAUUSD", "td", "XAU/USD", "30min"),
     ("XAUUSD", "td", "XAU/USD", "4h"),
-    ("XAGUSD", "td", "XAG/USD", "1h"),
-    ("XAGUSD", "td", "XAG/USD", "30min"),
-    ("XAGUSD", "td", "XAG/USD", "4h"),
+    ("XAGUSD", "yf", "SI=F", "1h"),
+    ("XAGUSD", "yf", "SI=F", "30min"),
+    ("XAGUSD", "yf", "SI=F", "4h"),
 ]
 
 
