@@ -13,9 +13,8 @@ JOBS = [
     ("XAGUSD", "td", "XAG/USD", "1h"),
     ("XAGUSD", "td", "XAG/USD", "30min"),
     ("XAGUSD", "td", "XAG/USD", "4h"),
-    ("NEFT", "yf", "CL=F", "30min"),
-    ("NEFT", "yf", "CL=F", "4h"),
-]
+
+
 
 SIG_MODE = "FU"          # "FU", "FU+ATT", "HCS"
 RR = 2.0
@@ -182,10 +181,17 @@ except Exception:
 if "pos" in S:                       # eski format (faqat oltin H1)
     S = {"XAU/USD|1h": S}
 
+errs = []
 for job in JOBS:
     try:
         run_job(*job, S)
     except Exception as e:
         print(job, "xato:", e)
+        errs.append(f"{job[0]} {TFL[job[3]]}: {str(e)[:150]}")
+
+msg = "\n".join(errs)
+if msg and msg != S.get("_err"):
+    send("XATO:\n" + msg)
+S["_err"] = msg
 
 json.dump(S, open("state.json", "w"))
