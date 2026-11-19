@@ -13,7 +13,7 @@ JOBS = [
     ("XAGUSD", "td", "XAG/USD", "1h"),
     ("XAGUSD", "td", "XAG/USD", "30min"),
     ("XAGUSD", "td", "XAG/USD", "4h"),
-
+]
 
 
 SIG_MODE = "FU"          # "FU", "FU+ATT", "HCS"
