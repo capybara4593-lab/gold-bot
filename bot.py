@@ -6,14 +6,20 @@ TD_KEY = os.environ["TD_KEY"]
 TG_TOKEN = os.environ["TG_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-# (nom, manba, symbol, interval[, rejim])   rejim bo'lmasa SIG_MODE ishlatiladi
+# (nom, manba, symbol, interval[, rejim[, sozlamalar]])
+#   rejim bo'lmasa SIG_MODE ishlatiladi.  CRANK sozlamalari: {"htf": 1440} = 1D trend filtri, {"htf": 240} = 4h filtri (minutda)
 JOBS = [
-    ("XAUUSD", "td", "XAU/USD", "15min", "CRANK"),   # <-- YANGI: CRANK, teskari signalda chiqish
+    # --- CRANK + trend filtri (gold). 16.7 yillik tarixda tekshirilgan ---
+    ("XAUUSD", "td", "XAU/USD", "4h", "CRANK", {"htf": 1440}),    # eng yaxshi tasdiqlangan: PF 1.52 (kam signal)
+    ("XAUUSD", "td", "XAU/USD", "1h", "CRANK", {"htf": 1440}),    # PF 1.33, ko'proq signal
+    # tajribaviy: faqat 4.2 yillik tarixda tekshirilgan
+    ("XAUUSD", "td", "XAU/USD", "30min", "CRANK", {"htf": 240}),
 
-    ("XAUUSD", "td", "XAU/USD", "1h"),
-    ("XAUUSD", "td", "XAU/USD", "4h"),
-    ("XAGUSD", "yf", "SI=F", "1h"),
-    ("XAGUSD", "yf", "SI=F", "4h"),
+    # --- eski FU ishlari: backtestda foyda bermadi (gold 1h PF 0.88), o'chirib qo'yildi ---
+    # ("XAUUSD", "td", "XAU/USD", "1h"),
+    # ("XAUUSD", "td", "XAU/USD", "4h"),
+    # ("XAGUSD", "yf", "SI=F", "1h"),
+    # ("XAGUSD", "yf", "SI=F", "4h"),
 ]
 
 SIG_MODE = "FU"          # "FU", "FU+ATT", "HCS"  (CRANK ishlariga ta'sir qilmaydi)
@@ -30,7 +36,12 @@ BODY_RATIO = 0.3
 # ---- CRANK [HIGH VOLTAGE] (backtest qilingan sozlamalar, hajm o'chiq) ----
 CRANK = dict(fast=11, slow=28, basis=56, norm_len=56, mult=1.6, thr=0.2,
              use_cci=True, cci_len=55, cci_up=120.0, cci_dn=-130.0)
-CRANK_BARS = 1000        # tarix (isinish uchun kamida ~400 kerak)
+CRANK_HTF_EMA = 50       # yuqori timeframe trend filtri: HTF yopilish > EMA(50) => faqat LONG
+CRANK_MAX_LATE = 3       # signal kechiksa ham kirish faqat shu necha sham ichida (undan keyin o'tkazib yuboriladi)
+CRANK_MIN_BARS = 500     # indikator isinishi uchun minimal sham soni
+CRANK_NOTIFY_SKIPPED = True   # filtr rad etgan signalni ham xabar qilish
+CRANK_BARS = {"15min": 1500, "30min": 2000, "1h": 5000, "4h": 1500}   # so'raladigan sham soni (1D filtr uchun 1h da ko'p tarix kerak)
+CRANK_MIN_HTF_BARS = 120   # filtr EMA(50) to'g'ri hisoblanishi uchun minimal yuqori timeframe sham soni
 
 FMT = "%Y-%m-%d %H:%M:%S"
 TFM = {"15min": 15, "30min": 30, "1h": 60, "4h": 240}
@@ -142,43 +153,90 @@ def compute_crank(close, p=CRANK):
             st[i] = st[i - 1]
     return st
 
-def crank_init(label, cdf):
-    """Birinchi ishga tushishda joriy trendni pozitsiya sifatida qabul qiladi."""
+def htf_name(m):
+    return "1D" if m == 1440 else f"{m // 60}h"
+
+def htf_dir_asof(cdf, tf, htf_min, n=CRANK_HTF_EMA):
+    """Har sham uchun: shu sham YOPILGAN paytda ma'lum bo'lgan oxirgi TUGAGAN yuqori timeframe
+    shamining yo'nalishi (+1: yopilish > EMA(n), -1: aks holda). Kelajakka qarash yo'q."""
+    t = pd.to_datetime(cdf.time)
+    c = pd.Series(cdf.Close.values, index=t)
+    h = c.resample(f"{htf_min}min", label="left", closed="left").last().dropna()
+    if len(h) < CRANK_MIN_HTF_BARS:
+        raise Exception(f"{htf_name(htf_min)} filtr uchun tarix yetarli emas: {len(h)} < {CRANK_MIN_HTF_BARS}")
+    ema = h.ewm(span=n, adjust=False).mean()
+    known = pd.Series(np.where(h > ema, 1, -1), index=h.index + pd.Timedelta(minutes=htf_min))
+    bar_end = t + pd.Timedelta(minutes=tf)
+    return known.reindex(bar_end, method="ffill").fillna(0).astype(int).values
+
+def _flips(st):
+    return [i for i in range(1, len(st)) if st[i] != st[i - 1]]
+
+def crank_init(label, cdf, tf, htf_min):
+    """Birinchi ishga tushish: joriy holatni eslab qoladi (filtr mos bo'lsa pozitsiya sifatida)."""
     c = cdf.Close.values
     st = compute_crank(c)
-    flips = [i for i in range(1, len(st)) if st[i] != st[i - 1]]
-    f = flips[-1] if flips else len(st) - 1
+    fl = _flips(st)
+    f = fl[-1] if fl else len(st) - 1
     side = "LONG" if st[-1] == 1 else "SHORT"
     allowed = TRADE_LONG if side == "LONG" else TRADE_SHORT
-    send(f"Kuzatuv boshlandi: {label} (CRANK)\nJoriy trend: {side}, signal narxi {c[f]:.2f}")
-    if not allowed:
-        return None
-    return dict(side=side, entry=float(c[f]), sl=None, tp=None, t=cdf.time.iloc[-1])
+    txt = f"Kuzatuv boshlandi: {label}\nJoriy CRANK trendi: {side}, signal narxi {c[f]:.2f}"
+    pos = None
+    if htf_min:
+        hd = htf_dir_asof(cdf, tf, htf_min)
+        aligned = hd[-1] == st[-1]
+        txt += f"\n{htf_name(htf_min)} trend filtri: {'LONG' if hd[-1] == 1 else 'SHORT'} -> " + ("mos, kuzatamiz" if aligned else "mos emas, kutamiz")
+    else:
+        aligned = True
+    if allowed and aligned:
+        pos = dict(side=side, entry=float(c[f]), sl=None, tp=None, t=cdf.time.iloc[-1], ft=cdf.time.iloc[f])
+    txt += "\nBu eski signal, yangi kirish EMAS. Keyingi yangi signal xabar qilinadi."
+    send(txt)
+    return pos, cdf.time.iloc[f]
 
-def crank_step(label, cdf, pos):
-    """Yangi sham yopilganda chaqiriladi. Chiqish faqat teskari signalda."""
+def crank_step(label, cdf, pos, flip_t, tf, htf_min):
+    """Yangi sham yopilganda chaqiriladi. Qaytaradi: (pos, flip_t).
+    Faqat YANGI signalga (flip_t dan keyingi) harakat qiladi, chiqish faqat teskari signalda."""
     c = cdf.Close.values
     st = compute_crank(c)
     n = len(st)
-    flips = [i for i in range(1, n) if st[i] != st[i - 1]]
-    if not flips:
-        return pos
-    f = flips[-1]
+    fl = _flips(st)
+    if not fl:
+        return pos, flip_t
+    f = fl[-1]
+    ft = cdf.time.iloc[f]
+    if flip_t is not None and ft <= flip_t:
+        return pos, flip_t                      # yangi signal yo'q (takroriy xabar bo'lmaydi)
+    new_n = sum(1 for i in fl if cdf.time.iloc[i] > (flip_t or ""))
     target = "LONG" if st[f] == 1 else "SHORT"
-    if pos is not None and pos["side"] == target:
-        return pos
-    allowed = TRADE_LONG if target == "LONG" else TRADE_SHORT
     cp = float(c[f])
     late = n - 1 - f
     note = f"\n(kechikkan signal: {late} sham oldin)" if late > 0 else ""
-    if pos is not None:
+    if new_n > 1:
+        note += f"\n(diqqat: {new_n} ta signal o'tkazib yuborilgan, oxirgisi hisobga olindi)"
+    if pos is not None and pos["side"] != target:
         pnl = (cp - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - cp)
         send(f"{label}: CHIQISH {pos['side']} (teskari signal) @ {cp:.2f}\nNatija: {pnl:+.2f} punkt{note}")
         pos = None
-    if allowed:
-        pos = dict(side=target, entry=cp, sl=None, tp=None, t=cdf.time.iloc[-1])
-        send(f"{label}: {target} kirish @ {cp:.2f}\nChiqish: teskari signalda (SL/TP yo'q){note}")
-    return pos
+    elif pos is not None:
+        return pos, ft                          # holat allaqachon mos
+    allowed = TRADE_LONG if target == "LONG" else TRADE_SHORT
+    aligned = True
+    if htf_min:
+        aligned = htf_dir_asof(cdf, tf, htf_min)[f] == st[f]
+    if allowed and aligned and late <= CRANK_MAX_LATE:
+        pos = dict(side=target, entry=cp, sl=None, tp=None, t=cdf.time.iloc[-1], ft=ft)
+        extra = f"\n{htf_name(htf_min)} trend filtri: mos" if htf_min else ""
+        send(f"{label}: {target} kirish @ {cp:.2f}\nChiqish: teskari signalda (SL/TP yo'q){extra}{note}")
+    elif CRANK_NOTIFY_SKIPPED:
+        if not allowed:
+            why = "bu yo'nalish o'chirilgan"
+        elif not aligned:
+            why = f"filtr rad etdi ({htf_name(htf_min)} trend teskari)"
+        else:
+            why = "juda kech qoldi"
+        send(f"{label}: {target} signal o'tkazib yuborildi - {why}{note}")
+    return pos, ft
 
 # ------------------------------------------------------------------ umumiy
 def send(text):
@@ -186,11 +244,13 @@ def send(text):
     requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                   data={"chat_id": CHAT_ID, "text": text}, timeout=10)
 
-def run_job(S, name, src, sym, iv, mode=None):
+def run_job(S, name, src, sym, iv, mode=None, opt=None):
     mode = mode or SIG_MODE
+    opt = opt or {}
+    htf_min = opt.get("htf")
     tf = TFM[iv]
-    key = f"{sym}|{iv}"
-    label = f"{name} {TFL[iv]}"
+    key = f"{sym}|{iv}" + ("|CRANK" + (f"|h{htf_min}" if htf_min else "") if mode == "CRANK" else "")
+    label = f"{name} {TFL[iv]}" + (" CRANK" + (f"+{htf_name(htf_min)}" if htf_min else "") if mode == "CRANK" else "")
     st = S.get(key)
     now = utcnow()
 
@@ -202,20 +262,24 @@ def run_job(S, name, src, sym, iv, mode=None):
         if (not st["pos"] or mode == "CRANK") and not bar_due:
             return   # kerak bo'lmasa so'rov yubormaymiz (limitni tejash)
 
-    size = CRANK_BARS if mode == "CRANK" else 500
+    size = CRANK_BARS.get(iv, 1500) if mode == "CRANK" else 500
     df = get_td(sym, iv, size) if src == "td" else get_yf(sym, iv)
     df["complete"] = [datetime.strptime(t, FMT) + timedelta(minutes=tf) <= now
                       for t in df.time]
     cdf = df[df.complete].reset_index(drop=True)
 
+    if mode == "CRANK" and len(cdf) < CRANK_MIN_BARS:
+        raise Exception(f"Sham yetarli emas: {len(cdf)} < {CRANK_MIN_BARS}")
+
     if st is None:
+        flip0 = None
         if mode == "CRANK":
-            pos0 = crank_init(label, cdf)
+            pos0, flip0 = crank_init(label, cdf, tf, htf_min)
         else:
             pos0 = None
             send(f"Kuzatuv boshlandi: {label}")
-        st = {"pos": pos0, "last_t": cdf.time.iloc[-1], "retry": None}
-    pos, last_t = st["pos"], st["last_t"]
+        st = {"pos": pos0, "last_t": cdf.time.iloc[-1], "retry": None, "flip_t": flip0}
+    pos, last_t, flip_t = st["pos"], st["last_t"], st.get("flip_t")
 
     if pos and pos.get("sl") is not None:
         for _, b in df[df.time > pos["t"]].iterrows():
@@ -233,7 +297,7 @@ def run_job(S, name, src, sym, iv, mode=None):
     if cdf.time.iloc[-1] != last_t:
         last_t = cdf.time.iloc[-1]
         if mode == "CRANK":
-            pos = crank_step(label, cdf, pos)
+            pos, flip_t = crank_step(label, cdf, pos, flip_t, tf, htf_min)
         else:
             longs, shorts = compute(cdf)
             i = len(cdf) - 1
@@ -258,7 +322,7 @@ def run_job(S, name, src, sym, iv, mode=None):
     retry = None
     if newest + timedelta(minutes=2 * tf) < now:
         retry = (now + timedelta(minutes=30)).strftime(FMT)
-    S[key] = {"pos": pos, "last_t": last_t, "retry": retry}
+    S[key] = {"pos": pos, "last_t": last_t, "retry": retry, "flip_t": flip_t}
 
 def main():
     try:
