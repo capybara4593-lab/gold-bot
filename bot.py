@@ -8,10 +8,10 @@ CHAT_ID = os.environ["CHAT_ID"]
 # (nom, manba, symbol, interval)  <- keraksizini o'chirib tashlasa bo'ladi
 JOBS = [
     ("XAUUSD", "td", "XAU/USD", "1h"),
-    ("XAUUSD", "td", "XAU/USD", "30min"),
+    
     ("XAUUSD", "td", "XAU/USD", "4h"),
     ("XAGUSD", "yf", "SI=F", "1h"),
-    ("XAGUSD", "yf", "SI=F", "30min"),
+
     ("XAGUSD", "yf", "SI=F", "4h"),
 ]
 
